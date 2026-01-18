@@ -2,7 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -28,10 +33,62 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
 	// TODO: implement the upload here
+	const maxMemory int64 = 10 << 20
+	r.ParseMultipartForm(maxMemory)
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	file, header, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
+		return
+	}
+	defer file.Close()
+
+	contentType := header.Header.Get("Content-Type")
+
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Video not found", err)
+		return
+	}
+
+	if userID != video.UserID {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't Parse Content-Type Header", err)
+		return
+	}
+	if mediaType != "image/png" && mediaType != "image/jpeg" {
+		respondWithError(w, http.StatusBadRequest, "Provided file is not an image", err)
+		return
+	}
+	fileExtension := strings.Split(mediaType, "/")[1]
+	fileName := videoIDString + "." + fileExtension
+	filePath := filepath.Join(cfg.assetsRoot, fileName)
+	thumbnailFile, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create file", err)
+		return
+	}
+
+	if _, err := io.Copy(thumbnailFile, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't copy file contents", err)
+		return
+	}
+
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, fileName)
+	video.ThumbnailURL = &thumbnailURL
+
+	if err = cfg.db.UpdateVideo(video); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video metadata", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
