@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -84,9 +88,26 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
+		return
+	}
+
+	prefix := ""
+
+	switch aspectRatio {
+	case "16:9":
+		prefix = "landscape/"
+	case "9:16":
+		prefix = "portrait/"
+	default:
+		prefix = "other/"
+	}
+
 	fileName := make([]byte, 32)
 	rand.Read(fileName)
-	key := base64.RawURLEncoding.EncodeToString(fileName) + ".mp4"
+	key := prefix + base64.RawURLEncoding.EncodeToString(fileName) + ".mp4"
 
 	if _, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
@@ -109,4 +130,33 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	fmt.Println("uploaded video for", videoID, "by user", userID)
 
 	respondWithJSON(w, http.StatusOK, dbVideo)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	type parameters struct {
+		Streams []struct {
+			Width  int `json:"width,omitempty"`
+			Height int `json:"height,omitempty"`
+		} `json:"streams"`
+	}
+	params := parameters{}
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	buffer := bytes.Buffer{}
+	cmd.Stdout = &buffer
+	cmd.Run()
+	if err := json.Unmarshal(buffer.Bytes(), &params); err != nil {
+		return "", fmt.Errorf("couldn't unamarshal json")
+	}
+	width := params.Streams[0].Width
+	height := params.Streams[0].Height
+
+	tolerance := 100.00
+
+	if math.Abs(float64((width*9)-(height*16))) < tolerance {
+		return "16:9", nil
+	} else if math.Abs(float64((width*16)-(height*9))) < tolerance {
+		return "9:16", nil
+	}
+
+	return "other", nil
 }
