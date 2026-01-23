@@ -94,6 +94,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	processedVideoPath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error moving moov atom to start of the video", err)
+		return
+	}
+
+	processedVideoData, err := os.ReadFile(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error reading proccesed file", err)
+		return
+	}
+
+	processedVideoFile := bytes.NewReader(processedVideoData)
+
 	prefix := ""
 
 	switch aspectRatio {
@@ -112,7 +126,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	if _, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &key,
-		Body:        tempFile,
+		Body:        processedVideoFile,
 		ContentType: &mediaType,
 	}); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't put the object into s3", err)
@@ -159,4 +173,16 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 
 	return "other", nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := filePath + ".processing"
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputPath)
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("Couldn't run ffmepg command: %v", err)
+	}
+
+	return outputPath, nil
 }
